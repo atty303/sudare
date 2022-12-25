@@ -1,5 +1,4 @@
 use std::io::{BufReader, Read};
-use std::ops::Range;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -35,7 +34,7 @@ impl TerminalConfiguration for TermConfig {
 fn main() -> Result<(), Error> {
     let mut term = wezterm_term::Terminal::new(
         TerminalSize {
-            rows: 24,
+            rows: 10,
             cols: 80,
             pixel_width: 0,
             pixel_height: 0,
@@ -50,7 +49,7 @@ fn main() -> Result<(), Error> {
     let pty_system = NativePtySystem::default();
 
     let pty = pty_system.openpty(PtySize {
-        rows: 24,
+        rows: 10,
         cols: 80,
         pixel_width: 0,
         pixel_height: 0,
@@ -86,7 +85,7 @@ fn main() -> Result<(), Error> {
     buf.terminal().set_raw_mode()?;
     buf.terminal().enter_alternate_screen()?;
     buf.terminal().set_screen_size(ScreenSize {
-        rows: 24,
+        rows: 10,
         cols: 80,
         xpixel: 0,
         ypixel: 0,
@@ -158,23 +157,44 @@ fn main() -> Result<(), Error> {
                 term.advance_bytes(&buffer);
                 buffer.clear();
 
-                buf.add_change(Change::ClearScreen(ColorAttribute::Default));
+                //                buf.add_change(Change::ClearScreen(ColorAttribute::Default));
+                buf.add_change(Change::CursorPosition {
+                    x: Position::Absolute(20),
+                    y: Position::Absolute(20),
+                });
 
-                let changes = term
-                    .screen()
-                    .lines_in_phys_range(Range { start: 0, end: 24 })
+                let screen = term.screen();
+                let (_, changes) = screen
+                    .lines_in_phys_range(screen.phys_range(&(0..10)))
                     .iter()
-                    .flat_map(|l| {
-                        let mut xs = l.changes(&CellAttributes::default());
-                        xs.append(&mut vec![
-                            Change::ClearToEndOfLine(ColorAttribute::Default),
-                            Change::Text("\r\n".into()),
-                        ]);
-                        xs
-                    })
-                    .collect();
+                    .fold(
+                        (CellAttributes::default(), Vec::<Change>::new()),
+                        |(a, mut xs), l| {
+                            l.visible_cells()
+                                .last()
+                                .map(|c| {
+                                    //let ys = &mut xs;
+                                    xs.extend(l.changes(&a));
+                                    xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+                                    xs.push(Change::CursorPosition {
+                                        x: Position::Absolute(0),
+                                        y: Position::Relative(1),
+                                    });
+                                    // TODO: c.attrs().wrapped() ?
+                                    (c.attrs().clone(), xs.to_vec())
+                                })
+                                .unwrap_or({
+                                    xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+                                    xs.push(Change::CursorPosition {
+                                        x: Position::Absolute(0),
+                                        y: Position::Relative(1),
+                                    });
+                                    (a, xs)
+                                })
+                        },
+                    );
 
-                buf.add_changes(changes);
+                buf.add_changes(changes.to_vec());
 
                 //print!("{} ", bytes.len());
                 buf.flush().unwrap();
