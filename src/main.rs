@@ -10,12 +10,75 @@ use termwiz::caps::Capabilities;
 use termwiz::cell::AttributeChange;
 use termwiz::color::{AnsiColor, ColorAttribute};
 use termwiz::input::{InputEvent, KeyCode, KeyEvent};
-use termwiz::surface::{Change, Position, Surface};
+use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{new_terminal, ScreenSize, Terminal};
+use termwiz::widgets::layout::{ChildOrientation, Constraints};
+use termwiz::widgets::{CursorShapeAndPosition, RenderArgs, Ui, UpdateArgs, Widget, WidgetEvent};
 use termwiz::Error;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{CellAttributes, TerminalConfiguration, TerminalSize};
+
+struct MainScreen {}
+
+impl MainScreen {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Widget for MainScreen {
+    fn render(&mut self, args: &mut RenderArgs) {}
+
+    fn get_size_constraints(&self) -> Constraints {
+        let mut c = Constraints::default();
+        c.child_orientation = ChildOrientation::Vertical;
+        c
+    }
+}
+
+struct Window<'a> {
+    text: &'a mut String,
+}
+
+impl<'a> Window<'a> {
+    /// Initialize the widget
+    pub fn new(text: &'a mut String) -> Self {
+        Self { text }
+    }
+}
+
+impl<'a> Widget for Window<'a> {
+    fn render(&mut self, args: &mut RenderArgs) {
+        let d = args.surface.dimensions();
+        // args.surface.add_change(Change::CursorPosition {
+        //     x: Position::Absolute(0),
+        //     y: Position::Absolute(0),
+        // });
+        args.surface.add_change(format!("size is {:?}\r\n", d));
+        *args.cursor = CursorShapeAndPosition {
+            visibility: CursorVisibility::Hidden,
+            ..Default::default()
+        }
+    }
+
+    fn get_size_constraints(&self) -> Constraints {
+        Constraints::default().set_fixed_height(5).clone()
+    }
+
+    fn process_event(&mut self, event: &WidgetEvent, _args: &mut UpdateArgs) -> bool {
+        match event {
+            WidgetEvent::Input(InputEvent::Key(KeyEvent {
+                key: KeyCode::Char(c),
+                ..
+            })) => match c.to_digit(10) {
+                Some(i) => true,
+                None => false,
+            },
+            _ => false,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct TermConfig {
@@ -79,40 +142,41 @@ fn main() -> Result<(), Error> {
     });
 
     /////////////////
+    let mut tmp0 = String::new();
+    let mut tmp1 = String::new();
+
     let caps = Capabilities::new_from_env()?;
 
     let mut buf = BufferedTerminal::new(new_terminal(caps)?)?;
     buf.terminal().set_raw_mode()?;
     buf.terminal().enter_alternate_screen()?;
-    buf.terminal().set_screen_size(ScreenSize {
-        rows: 10,
-        cols: 80,
-        xpixel: 0,
-        ypixel: 0,
-    })?;
 
-    let mut block = Surface::new(5, 5);
-    block.add_change(Change::ClearScreen(AnsiColor::Blue.into()));
-    block.add_change("1234567890");
-    buf.draw_from_screen(&block, 10, 10);
+    // buf.terminal().set_screen_size(ScreenSize {
+    //     rows: 10,
+    //     cols: 80,
+    //     xpixel: 0,
+    //     ypixel: 0,
+    // })?;
 
-    buf.add_change(Change::Attribute(AttributeChange::Foreground(
-        AnsiColor::Maroon.into(),
-    )));
-    buf.add_change("Hello world\r\n");
-    buf.add_change(Change::Attribute(AttributeChange::Foreground(
-        AnsiColor::Red.into(),
-    )));
-    buf.add_change("and in red here\r\n");
-    buf.add_change(Change::CursorPosition {
-        x: Position::Absolute(0),
-        y: Position::Absolute(20),
-    });
-
-    buf.flush()?;
+    let mut ui = Ui::new();
+    let root_id = ui.set_root(MainScreen::new());
+    ui.add_child(root_id, Window::new(&mut tmp0));
+    ui.add_child(root_id, Window::new(&mut tmp1));
 
     loop {
+        ui.process_event_queue()?;
+        if ui.render_to_screen(&mut buf)? {
+            continue;
+        }
+        buf.flush()?;
+
         match buf.terminal().poll_input(Some(Duration::ZERO)) {
+            Ok(Some(InputEvent::Resized { rows, cols })) => {
+                // FIXME: this is working around a bug where we don't realize
+                // that we should redraw everything on resize in BufferedTerminal.
+                buf.add_change(Change::ClearScreen(Default::default()));
+                buf.resize(cols, rows);
+            }
             Ok(Some(input)) => match input {
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Escape,
@@ -120,15 +184,8 @@ fn main() -> Result<(), Error> {
                 }) => {
                     break;
                 }
-                InputEvent::Key(KeyEvent {
-                    key: KeyCode::Char(c),
-                    ..
-                }) => {
-                    buf.add_change(format!("{}", c));
-                    buf.flush()?;
-                }
-                _ => {
-                    print!("{:?}\r\n", input);
+                input @ _ => {
+                    ui.queue_event(WidgetEvent::Input(input));
                 }
             },
             Ok(None) => {}
@@ -137,6 +194,8 @@ fn main() -> Result<(), Error> {
                 break;
             }
         }
+
+        /*
         {
             let mut buffer = Vec::<u8>::new();
 
@@ -200,6 +259,7 @@ fn main() -> Result<(), Error> {
                 buf.flush().unwrap();
             }
         }
+         */
 
         sleep(Duration::from_millis(10));
     }
