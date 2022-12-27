@@ -19,6 +19,62 @@ use termwiz::Error;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{CellAttributes, TerminalConfiguration, TerminalSize};
 
+type Procfile = Vec<ProcessGroup>;
+
+#[derive(Debug, Clone)]
+struct ProcessGroup {
+    title: String,
+    members: Vec<Process>,
+}
+
+#[derive(Debug, Clone)]
+enum Process {
+    Null,
+    Command { title: String, argv: String }
+}
+
+struct UiState {
+    procfile: Procfile,
+    selected_window_index: isize,
+    windows: Vec<UiWindow>,
+    surface: Surface,
+}
+
+impl UiState {
+    pub fn new(procfile: Procfile, dimension: (usize, usize)) -> UiState {
+        UiState {
+            procfile: procfile.to_vec(),
+            selected_window_index: 0,
+            windows: procfile.into_iter().map(|it| UiWindow {
+                process_group: it,
+            }).collect(),
+            surface: Surface::new(dimension.0, dimension.1),
+        }
+    }
+
+    pub fn render_to_screen(&self, screen: &mut Surface) {
+        let (width, height) = screen.dimensions();
+        // Render from scratch into a fresh screen buffer
+        let mut alt_screen = Surface::new(width, height);
+
+        self.windows.iter().for_each(|it| it.render(&mut alt_screen));
+
+        // Now compute a delta and apply it to the actual screen
+        let diff = screen.diff_screens(&alt_screen);
+        screen.add_changes(diff);
+    }
+}
+
+struct UiWindow {
+    process_group: ProcessGroup,
+}
+
+impl UiWindow {
+    pub fn render(&self, screen: &mut Surface) {
+
+    }
+}
+
 struct MainScreen {}
 
 impl MainScreen {
@@ -95,6 +151,25 @@ impl TerminalConfiguration for TermConfig {
 }
 
 fn main() -> Result<(), Error> {
+    let procfile = vec![
+        ProcessGroup {
+            title: String::from("foo"),
+            members: vec![
+                Process::Null,
+                Process::Command { title: "cloudflare".to_string(), argv: "ping 1.1.1.1".to_string() },
+                Process::Command { title: "google".to_string(), argv: "ping 8.8.8.8".to_string() },
+            ],
+        },
+        ProcessGroup {
+            title: String::from("bar"),
+            members: vec![
+                Process::Null,
+                Process::Command { title: "cloudflare".to_string(), argv: "ping 1.1.1.1".to_string() },
+                Process::Command { title: "google".to_string(), argv: "ping 8.8.8.8".to_string() },
+            ],
+        },
+    ];
+
     let mut term = wezterm_term::Terminal::new(
         TerminalSize {
             rows: 10,
@@ -158,18 +233,9 @@ fn main() -> Result<(), Error> {
     //     ypixel: 0,
     // })?;
 
-    let mut ui = Ui::new();
-    let root_id = ui.set_root(MainScreen::new());
-    ui.add_child(root_id, Window::new(&mut tmp0));
-    ui.add_child(root_id, Window::new(&mut tmp1));
+    let ui_state = UiState::new(procfile, (buf.dimensions()));
 
     loop {
-        ui.process_event_queue()?;
-        if ui.render_to_screen(&mut buf)? {
-            continue;
-        }
-        buf.flush()?;
-
         match buf.terminal().poll_input(Some(Duration::ZERO)) {
             Ok(Some(InputEvent::Resized { rows, cols })) => {
                 // FIXME: this is working around a bug where we don't realize
@@ -185,7 +251,6 @@ fn main() -> Result<(), Error> {
                     break;
                 }
                 input @ _ => {
-                    ui.queue_event(WidgetEvent::Input(input));
                 }
             },
             Ok(None) => {}
