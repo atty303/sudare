@@ -1,4 +1,5 @@
-use std::io::{BufReader, Read};
+use std::hash::Hasher;
+use std::io::{BufReader, Read, Write};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -6,11 +7,11 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use termwiz::caps::Capabilities;
+use termwiz::caps::{Capabilities, ProbeHints};
 use termwiz::cell::AttributeChange;
-use termwiz::color::{AnsiColor, ColorAttribute};
+use termwiz::color::{AnsiColor, ColorAttribute, ColorSpec};
 use termwiz::input::{InputEvent, KeyCode, KeyEvent};
-use termwiz::surface::{Change, CursorVisibility, Position, Surface};
+use termwiz::surface::{Change, CursorVisibility, Position, SequenceNo, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{new_terminal, ScreenSize, Terminal};
 use termwiz::widgets::layout::{ChildOrientation, Constraints};
@@ -30,26 +31,34 @@ struct ProcessGroup {
 #[derive(Debug, Clone)]
 enum Process {
     Null,
-    Command { title: String, argv: String }
+    Command { title: String, argv: String },
 }
 
 struct UiState {
     procfile: Procfile,
-    selected_window_index: isize,
+    focused_window_index: usize,
     windows: Vec<UiWindow>,
     surface: Surface,
+    min_window_height: usize,
 }
 
 impl UiState {
     pub fn new(procfile: Procfile, dimension: (usize, usize)) -> UiState {
         UiState {
             procfile: procfile.to_vec(),
-            selected_window_index: 0,
-            windows: procfile.into_iter().map(|it| UiWindow {
-                process_group: it,
-            }).collect(),
+            focused_window_index: 0,
+            windows: procfile
+                .into_iter()
+                .map(|it| UiWindow { process_group: it })
+                .collect(),
             surface: Surface::new(dimension.0, dimension.1),
+            min_window_height: 2,
         }
+    }
+
+    pub fn set_focus(&mut self, delta: i32) {
+        self.focused_window_index =
+            ((self.focused_window_index as i32 + delta) % self.windows.len() as i32) as usize
     }
 
     pub fn render_to_screen(&self, screen: &mut Surface) {
@@ -57,7 +66,17 @@ impl UiState {
         // Render from scratch into a fresh screen buffer
         let mut alt_screen = Surface::new(width, height);
 
-        self.windows.iter().for_each(|it| it.render(&mut alt_screen));
+        let unfocused_height = self.windows.len().saturating_sub(1) * (1 + self.min_window_height);
+        let focused_height = height - unfocused_height;
+        self.windows.iter().enumerate().fold(0usize, |y, (i, it)| {
+            let h = if i == self.focused_window_index {
+                focused_height
+            } else {
+                1 + self.min_window_height
+            };
+            it.render(&mut alt_screen, y, h);
+            y + h
+        });
 
         // Now compute a delta and apply it to the actual screen
         let diff = screen.diff_screens(&alt_screen);
@@ -70,8 +89,16 @@ struct UiWindow {
 }
 
 impl UiWindow {
-    pub fn render(&self, screen: &mut Surface) {
-
+    pub fn render(&self, screen: &mut Surface, y: usize, h: usize) {
+        screen.add_changes(vec![
+            Change::CursorPosition {
+                x: Position::Absolute(0),
+                y: Position::Absolute(y),
+            },
+            Change::Text(self.process_group.title.clone()),
+            Change::ClearToEndOfLine(ColorAttribute::from(AnsiColor::Green)),
+        ]);
+        screen.flush_changes_older_than(SequenceNo::max_value());
     }
 }
 
@@ -156,16 +183,28 @@ fn main() -> Result<(), Error> {
             title: String::from("foo"),
             members: vec![
                 Process::Null,
-                Process::Command { title: "cloudflare".to_string(), argv: "ping 1.1.1.1".to_string() },
-                Process::Command { title: "google".to_string(), argv: "ping 8.8.8.8".to_string() },
+                Process::Command {
+                    title: "cloudflare".to_string(),
+                    argv: "ping 1.1.1.1".to_string(),
+                },
+                Process::Command {
+                    title: "google".to_string(),
+                    argv: "ping 8.8.8.8".to_string(),
+                },
             ],
         },
         ProcessGroup {
             title: String::from("bar"),
             members: vec![
                 Process::Null,
-                Process::Command { title: "cloudflare".to_string(), argv: "ping 1.1.1.1".to_string() },
-                Process::Command { title: "google".to_string(), argv: "ping 8.8.8.8".to_string() },
+                Process::Command {
+                    title: "cloudflare".to_string(),
+                    argv: "ping 1.1.1.1".to_string(),
+                },
+                Process::Command {
+                    title: "google".to_string(),
+                    argv: "ping 8.8.8.8".to_string(),
+                },
             ],
         },
     ];
@@ -220,11 +259,14 @@ fn main() -> Result<(), Error> {
     let mut tmp0 = String::new();
     let mut tmp1 = String::new();
 
-    let caps = Capabilities::new_from_env()?;
+    let caps =
+        Capabilities::new_with_hints(ProbeHints::new_from_env().mouse_reporting(Some(false)))?;
 
     let mut buf = BufferedTerminal::new(new_terminal(caps)?)?;
     buf.terminal().set_raw_mode()?;
-    buf.terminal().enter_alternate_screen()?;
+    //buf.terminal().enter_alternate_screen()?;
+    buf.add_change("\x1b[?1000l");
+    buf.add_change("\x1b[?1003l");
 
     // buf.terminal().set_screen_size(ScreenSize {
     //     rows: 10,
@@ -233,7 +275,7 @@ fn main() -> Result<(), Error> {
     //     ypixel: 0,
     // })?;
 
-    let ui_state = UiState::new(procfile, (buf.dimensions()));
+    let mut ui_state = UiState::new(procfile, (buf.dimensions()));
 
     loop {
         match buf.terminal().poll_input(Some(Duration::ZERO)) {
@@ -244,14 +286,29 @@ fn main() -> Result<(), Error> {
                 buf.resize(cols, rows);
             }
             Ok(Some(input)) => match input {
-                InputEvent::Key(KeyEvent {
+                InputEvent::Mouse(m) => {
+                    print!("mouse {:?}\r\n", m);
+                }
+                input @ InputEvent::Key(KeyEvent {
                     key: KeyCode::Escape,
                     ..
                 }) => {
+                    print!("escaped {:?}\r\n", input);
                     break;
                 }
-                input @ _ => {
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('n'),
+                    ..
+                }) => {
+                    ui_state.set_focus(1);
                 }
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('p'),
+                    ..
+                }) => {
+                    ui_state.set_focus(-1);
+                }
+                input @ _ => {}
             },
             Ok(None) => {}
             Err(e) => {
@@ -325,6 +382,9 @@ fn main() -> Result<(), Error> {
             }
         }
          */
+
+        ui_state.render_to_screen(&mut buf);
+        buf.flush();
 
         sleep(Duration::from_millis(10));
     }
