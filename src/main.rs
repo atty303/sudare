@@ -1,5 +1,7 @@
+use std::fmt::Pointer;
 use std::hash::Hasher;
 use std::io::{BufReader, Read, Write};
+use std::string::ToString;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -34,6 +36,17 @@ enum Process {
     Command { title: String, argv: String },
 }
 
+impl Process {
+    const DEFAULT_TITLE: &str = "default";
+
+    pub fn title(&self) -> String {
+        match self {
+            Process::Null => Process::DEFAULT_TITLE.to_string(),
+            Process::Command { title, argv } => title.to_string(),
+        }
+    }
+}
+
 struct UiState {
     procfile: Procfile,
     focused_window_index: usize,
@@ -47,34 +60,52 @@ impl UiState {
         UiState {
             procfile: procfile.to_vec(),
             focused_window_index: 0,
-            windows: procfile
-                .into_iter()
-                .map(|it| UiWindow { process_group: it })
-                .collect(),
+            windows: procfile.into_iter().map(|it| UiWindow::new(it)).collect(),
             surface: Surface::new(dimension.0, dimension.1),
             min_window_height: 2,
         }
     }
 
-    pub fn set_focus(&mut self, delta: i32) {
+    pub fn previous_window(&mut self) {
+        self.focused_window_index = if self.focused_window_index > 0 {
+            self.focused_window_index - 1
+        } else {
+            0
+        }
+    }
+
+    pub fn next_window(&mut self) {
         self.focused_window_index =
-            ((self.focused_window_index as i32 + delta) % self.windows.len() as i32) as usize
+            if self.focused_window_index < self.windows.len().saturating_sub(1) {
+                self.focused_window_index + 1
+            } else {
+                self.focused_window_index
+            };
+    }
+
+    pub fn select_process(&mut self, index: usize) {
+        if let Some(group) = self.windows.get_mut(self.focused_window_index) {
+            group.set_process(index);
+        }
     }
 
     pub fn render_to_screen(&self, screen: &mut Surface) {
         let (width, height) = screen.dimensions();
+
         // Render from scratch into a fresh screen buffer
         let mut alt_screen = Surface::new(width, height);
 
         let unfocused_height = self.windows.len().saturating_sub(1) * (1 + self.min_window_height);
         let focused_height = height - unfocused_height;
+
         self.windows.iter().enumerate().fold(0usize, |y, (i, it)| {
-            let h = if i == self.focused_window_index {
+            let focused = i == self.focused_window_index;
+            let h = if focused {
                 focused_height
             } else {
                 1 + self.min_window_height
             };
-            it.render(&mut alt_screen, y, h);
+            it.render(&mut alt_screen, y, h, focused);
             y + h
         });
 
@@ -86,80 +117,62 @@ impl UiState {
 
 struct UiWindow {
     process_group: ProcessGroup,
+    active_process_index: usize,
 }
 
 impl UiWindow {
-    pub fn render(&self, screen: &mut Surface, y: usize, h: usize) {
-        screen.add_changes(vec![
+    pub fn new(process_group: ProcessGroup) -> Self {
+        Self {
+            process_group,
+            active_process_index: 0,
+        }
+    }
+
+    pub fn set_process(&mut self, index: usize) {
+        if let Some(process) = self.process_group.members.get(index) {
+            self.active_process_index = index;
+        }
+    }
+
+    pub fn render(&self, screen: &mut Surface, y: usize, h: usize, focused: bool) {
+        let status_color = if focused {
+            AnsiColor::Fuchsia
+        } else {
+            AnsiColor::Grey
+        };
+        let mut changes = vec![
             Change::CursorPosition {
                 x: Position::Absolute(0),
                 y: Position::Absolute(y),
             },
+            Change::Attribute(AttributeChange::Background(ColorAttribute::from(
+                status_color,
+            ))),
+            Change::Attribute(AttributeChange::Foreground(ColorAttribute::from(
+                AnsiColor::White,
+            ))),
             Change::Text(self.process_group.title.clone()),
-            Change::ClearToEndOfLine(ColorAttribute::from(AnsiColor::Green)),
-        ]);
-        screen.flush_changes_older_than(SequenceNo::max_value());
-    }
-}
-
-struct MainScreen {}
-
-impl MainScreen {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Widget for MainScreen {
-    fn render(&mut self, args: &mut RenderArgs) {}
-
-    fn get_size_constraints(&self) -> Constraints {
-        let mut c = Constraints::default();
-        c.child_orientation = ChildOrientation::Vertical;
-        c
-    }
-}
-
-struct Window<'a> {
-    text: &'a mut String,
-}
-
-impl<'a> Window<'a> {
-    /// Initialize the widget
-    pub fn new(text: &'a mut String) -> Self {
-        Self { text }
-    }
-}
-
-impl<'a> Widget for Window<'a> {
-    fn render(&mut self, args: &mut RenderArgs) {
-        let d = args.surface.dimensions();
-        // args.surface.add_change(Change::CursorPosition {
-        //     x: Position::Absolute(0),
-        //     y: Position::Absolute(0),
-        // });
-        args.surface.add_change(format!("size is {:?}\r\n", d));
-        *args.cursor = CursorShapeAndPosition {
-            visibility: CursorVisibility::Hidden,
-            ..Default::default()
-        }
-    }
-
-    fn get_size_constraints(&self) -> Constraints {
-        Constraints::default().set_fixed_height(5).clone()
-    }
-
-    fn process_event(&mut self, event: &WidgetEvent, _args: &mut UpdateArgs) -> bool {
-        match event {
-            WidgetEvent::Input(InputEvent::Key(KeyEvent {
-                key: KeyCode::Char(c),
-                ..
-            })) => match c.to_digit(10) {
-                Some(i) => true,
-                None => false,
-            },
-            _ => false,
-        }
+            Change::Text(" | ".to_string()),
+        ];
+        let line = self
+            .process_group
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let indicator = if i == self.active_process_index {
+                    "*"
+                } else {
+                    ""
+                };
+                format!("{}{}:{}", indicator, i, it.title())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        changes.push(Change::Text(line));
+        changes.push(Change::ClearToEndOfLine(ColorAttribute::from(status_color)));
+        screen.add_changes(changes);
+        screen.flush_changes_older_than(SequenceNo::MAX);
     }
 }
 
@@ -265,8 +278,6 @@ fn main() -> Result<(), Error> {
     let mut buf = BufferedTerminal::new(new_terminal(caps)?)?;
     buf.terminal().set_raw_mode()?;
     //buf.terminal().enter_alternate_screen()?;
-    buf.add_change("\x1b[?1000l");
-    buf.add_change("\x1b[?1003l");
 
     // buf.terminal().set_screen_size(ScreenSize {
     //     rows: 10,
@@ -286,29 +297,31 @@ fn main() -> Result<(), Error> {
                 buf.resize(cols, rows);
             }
             Ok(Some(input)) => match input {
-                InputEvent::Mouse(m) => {
-                    print!("mouse {:?}\r\n", m);
-                }
-                input @ InputEvent::Key(KeyEvent {
+                InputEvent::Key(KeyEvent {
                     key: KeyCode::Escape,
                     ..
-                }) => {
-                    print!("escaped {:?}\r\n", input);
-                    break;
-                }
+                }) => break,
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char('n'),
                     ..
-                }) => {
-                    ui_state.set_focus(1);
-                }
+                })
+                | InputEvent::Key(KeyEvent {
+                    key: KeyCode::DownArrow,
+                    ..
+                }) => ui_state.next_window(),
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char('p'),
                     ..
-                }) => {
-                    ui_state.set_focus(-1);
-                }
-                input @ _ => {}
+                })
+                | InputEvent::Key(KeyEvent {
+                    key: KeyCode::UpArrow,
+                    ..
+                }) => ui_state.previous_window(),
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char(c),
+                    ..
+                }) if c.is_digit(10) => ui_state.select_process(c.to_digit(10).unwrap() as usize),
+                _ => {}
             },
             Ok(None) => {}
             Err(e) => {
