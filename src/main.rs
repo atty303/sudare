@@ -1,26 +1,27 @@
-use std::fmt::Pointer;
-use std::hash::Hasher;
-use std::io::{BufReader, Read, Write};
+use std::fmt::Debug;
+use std::fs::File;
+use std::io::{ErrorKind, Read};
+use std::ops::Deref;
 use std::string::ToString;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{Receiver, SendError, TryRecvError};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::thread::sleep;
+use std::thread::{sleep, JoinHandle};
 use std::time::Duration;
 
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{
+    Child, CommandBuilder, ExitStatus, NativePtySystem, PtyPair, PtySize, PtySystem,
+};
 use termwiz::caps::{Capabilities, ProbeHints};
-use termwiz::cell::AttributeChange;
-use termwiz::color::{AnsiColor, ColorAttribute, ColorSpec};
+use termwiz::cell::{AttributeChange, CellAttributes};
+use termwiz::color::{AnsiColor, ColorAttribute};
 use termwiz::input::{InputEvent, KeyCode, KeyEvent};
-use termwiz::surface::{Change, CursorVisibility, Position, SequenceNo, Surface};
+use termwiz::surface::{Change, Position, SequenceNo, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
-use termwiz::terminal::{new_terminal, ScreenSize, Terminal};
-use termwiz::widgets::layout::{ChildOrientation, Constraints};
-use termwiz::widgets::{CursorShapeAndPosition, RenderArgs, Ui, UpdateArgs, Widget, WidgetEvent};
+use termwiz::terminal::{new_terminal, Terminal};
 use termwiz::Error;
 use wezterm_term::color::ColorPalette;
-use wezterm_term::{CellAttributes, TerminalConfiguration, TerminalSize};
+use wezterm_term::{TerminalConfiguration, TerminalSize, VisibleRowIndex};
 
 type Procfile = Vec<ProcessGroup>;
 
@@ -42,7 +43,7 @@ impl Process {
     pub fn title(&self) -> String {
         match self {
             Process::Null => Process::DEFAULT_TITLE.to_string(),
-            Process::Command { title, argv } => title.to_string(),
+            Process::Command { title, argv: _ } => title.to_string(),
         }
     }
 }
@@ -83,13 +84,13 @@ impl UiState {
             };
     }
 
-    pub fn select_process(&mut self, index: usize) {
+    pub fn select_process(&mut self, pty_system: &dyn PtySystem, index: usize) {
         if let Some(group) = self.windows.get_mut(self.focused_window_index) {
-            group.set_process(index);
+            group.set_active(pty_system, self.surface.dimensions(), index);
         }
     }
 
-    pub fn render_to_screen(&self, screen: &mut Surface) {
+    pub fn render_to_screen(&mut self, screen: &mut Surface) {
         let (width, height) = screen.dimensions();
 
         // Render from scratch into a fresh screen buffer
@@ -98,16 +99,21 @@ impl UiState {
         let unfocused_height = self.windows.len().saturating_sub(1) * (1 + self.min_window_height);
         let focused_height = height - unfocused_height;
 
-        self.windows.iter().enumerate().fold(0usize, |y, (i, it)| {
-            let focused = i == self.focused_window_index;
-            let h = if focused {
-                focused_height
-            } else {
-                1 + self.min_window_height
-            };
-            it.render(&mut alt_screen, y, h, focused);
-            y + h
-        });
+        self.windows
+            .iter_mut()
+            .enumerate()
+            .fold(0usize, |y, (i, it)| {
+                let focused = i == self.focused_window_index;
+                let h = if focused {
+                    focused_height
+                } else {
+                    1 + self.min_window_height
+                };
+                it.render(&mut alt_screen, width, y, h, focused);
+                y + h
+            });
+
+        screen.add_change(Change::ClearScreen(ColorAttribute::Default));
 
         // Now compute a delta and apply it to the actual screen
         let diff = screen.diff_screens(&alt_screen);
@@ -118,6 +124,9 @@ impl UiState {
 struct UiWindow {
     process_group: ProcessGroup,
     active_process_index: usize,
+    pty_terminal: Option<PtyTerminal>,
+    width: usize,
+    height: usize,
 }
 
 impl UiWindow {
@@ -125,16 +134,39 @@ impl UiWindow {
         Self {
             process_group,
             active_process_index: 0,
+            pty_terminal: None,
+            width: 1,
+            height: 1,
         }
     }
 
-    pub fn set_process(&mut self, index: usize) {
+    pub fn set_active(
+        &mut self,
+        pty_system: &dyn PtySystem,
+        dimension: (usize, usize),
+        index: usize,
+    ) {
         if let Some(process) = self.process_group.members.get(index) {
+            if let Some(t) = &mut self.pty_terminal {
+                //                t.pty_process.kill().unwrap();
+            }
+            self.pty_terminal = None;
+
             self.active_process_index = index;
+
+            if let Process::Command { title: _, argv } = process {
+                if let Ok(pp) = PtyProcess::new(pty_system, dimension, argv) {
+                    self.pty_terminal = Some(PtyTerminal::new(pp, dimension));
+                }
+            }
         }
     }
 
-    pub fn render(&self, screen: &mut Surface, y: usize, h: usize, focused: bool) {
+    pub fn render(&mut self, screen: &mut Surface, w: usize, y: usize, h: usize, focused: bool) {
+        if let Some(t) = &mut self.pty_terminal {
+            t.resize_soft(w, h - 1);
+        }
+
         let status_color = if focused {
             AnsiColor::Fuchsia
         } else {
@@ -171,6 +203,18 @@ impl UiWindow {
             .join(" ");
         changes.push(Change::Text(line));
         changes.push(Change::ClearToEndOfLine(ColorAttribute::from(status_color)));
+        changes.push(Change::AllAttributes(CellAttributes::default()));
+        changes.push(Change::CursorPosition {
+            x: Position::Absolute(0),
+            y: Position::Relative(1),
+        });
+
+        if let Some(pt) = &mut self.pty_terminal {
+            if let Some(mut xs) = pt.poll() {
+                changes.append(&mut xs);
+            }
+        }
+
         screen.add_changes(changes);
         screen.flush_changes_older_than(SequenceNo::MAX);
     }
@@ -190,7 +234,237 @@ impl TerminalConfiguration for TermConfig {
     }
 }
 
+struct PtyTerminal {
+    terminal: wezterm_term::Terminal,
+    pty_process: PtyProcess,
+}
+
+impl PtyTerminal {
+    pub fn new(pty_process: PtyProcess, dimension: (usize, usize)) -> Self {
+        let terminal = wezterm_term::Terminal::new(
+            TerminalSize {
+                rows: dimension.1,
+                cols: dimension.0,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 0,
+            },
+            Arc::new(TermConfig { scroll_back: 1000 }),
+            "sudare",
+            "0.1.0",
+            Box::new(Vec::new()),
+        );
+
+        Self {
+            terminal,
+            pty_process,
+        }
+    }
+
+    pub fn resize_soft(&mut self, w: usize, h: usize) {
+        let c = self.terminal.get_size();
+        if c.cols != w || c.rows != h {
+            self.terminal.resize(TerminalSize {
+                rows: h,
+                cols: w,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 0,
+            })
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<Vec<Change>> {
+        let buffer = self.pty_process.poll();
+        if !buffer.is_empty() {
+            &self.terminal.advance_bytes(&buffer);
+        }
+
+        let c = self.terminal.get_size();
+        let screen = self.terminal.screen();
+        //screen.physical_rows
+        let (_, changes) = screen
+            .lines_in_phys_range(screen.phys_range(&(0..c.rows as VisibleRowIndex)))
+            .iter()
+            .fold(
+                (CellAttributes::default(), Vec::<Change>::new()),
+                |(a, mut xs), line| {
+                    line.visible_cells()
+                        .last()
+                        .map(|c| {
+                            //let ys = &mut xs;
+                            xs.extend(line.changes(&a));
+                            xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+                            xs.push(Change::CursorPosition {
+                                x: Position::Absolute(0),
+                                y: Position::Relative(1),
+                            });
+                            // TODO: c.attrs().wrapped() ?
+                            (c.attrs().clone(), xs.to_vec())
+                        })
+                        .unwrap_or({
+                            xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
+                            xs.push(Change::CursorPosition {
+                                x: Position::Absolute(0),
+                                y: Position::Relative(1),
+                            });
+                            (a, xs)
+                        })
+                },
+            );
+        Some(changes)
+    }
+}
+
+enum PtyMessage {
+    Bytes(Vec<u8>),
+}
+
+struct PtyProcess {
+    pty: PtyPair,
+    child: Box<dyn Child + Send + Sync>,
+    child_handle: Option<JoinHandle<()>>,
+    receiver: Receiver<PtyMessage>,
+    exit_status: Option<ExitStatus>,
+}
+
+impl PtyProcess {
+    pub fn new(
+        pty_system: &dyn PtySystem,
+        dimension: (usize, usize),
+        argv: &str,
+    ) -> Result<Self, Error> {
+        let pty = pty_system.openpty(PtySize {
+            rows: dimension.1 as u16,
+            cols: dimension.0 as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", argv]);
+        let maybe_child = pty.slave.spawn_command(cmd);
+        drop(&pty.slave);
+        let child = maybe_child?;
+
+        let (tx, receiver) = mpsc::channel();
+        let mut reader = pty.master.try_clone_reader()?;
+
+        let child_handle = thread::Builder::new()
+            .name(argv.to_string())
+            .spawn(move || {
+                let mut buffer = [0u8; 1024];
+                loop {
+                    let n = reader.read(&mut buffer[..]).unwrap();
+                    if n == 0 {
+                        break;
+                    } else {
+                        tx.send(PtyMessage::Bytes(buffer[..n].to_vec()));
+                    }
+                }
+                log::info!("thread finished");
+            })?;
+
+        Ok(Self {
+            pty,
+            child,
+            child_handle: Some(child_handle),
+            receiver,
+            exit_status: None,
+        })
+    }
+
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill(),
+            Err(e) => Err(e),
+        }?;
+        if let Some(handle) = self.child_handle.take() {
+            let r = match handle.join() {
+                Ok(_) => Ok(()),
+                Err(e) => Err(std::io::Error::new(ErrorKind::Other, format!("{:?}", e))),
+            };
+            self.child_handle = None;
+            r
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn poll(&mut self) -> Vec<u8> {
+        let mut buffer = Vec::<u8>::new();
+
+        loop {
+            match self.receiver.try_recv() {
+                Ok(PtyMessage::Bytes(mut bytes)) => {
+                    buffer.append(&mut bytes);
+                    if buffer.len() > 1024 {
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        match self.child.try_wait() {
+            Ok(Some(r)) => {
+                if self.exit_status.is_none() {
+                    buffer.append(
+                        &mut format!("[process exited with {}]", r.exit_code())
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    self.exit_status = Some(r);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::error!("try_wait error: {}", e);
+            }
+        }
+
+        buffer
+    }
+}
+
+impl Drop for PtyProcess {
+    fn drop(&mut self) {
+        log::debug!("pty_process dropped");
+        {
+            let mut writer = self.pty.master.take_writer().unwrap();
+            if cfg!(target_os = "macos") {
+                sleep(Duration::from_millis(20));
+            }
+        }
+
+        match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill(),
+            Err(e) => Err(e),
+        }
+        .unwrap();
+
+        self.child.wait().unwrap();
+
+        drop(&self.pty.master);
+
+        // if let Some(handle) = self.child_handle.take() {
+        //     handle.join().unwrap();
+        // }
+        log::debug!("done");
+    }
+}
+
 fn main() -> Result<(), Error> {
+    simplelog::WriteLogger::init(
+        simplelog::LevelFilter::Debug,
+        simplelog::Config::default(),
+        File::create("sudare.log").unwrap(),
+    )
+    .unwrap();
+
     let procfile = vec![
         ProcessGroup {
             title: String::from("foo"),
@@ -218,75 +492,24 @@ fn main() -> Result<(), Error> {
                     title: "google".to_string(),
                     argv: "ping 8.8.8.8".to_string(),
                 },
+                Process::Command {
+                    title: "echo".to_string(),
+                    argv: "echo Hello world".to_string(),
+                },
             ],
         },
     ];
 
-    let mut term = wezterm_term::Terminal::new(
-        TerminalSize {
-            rows: 10,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-            dpi: 0,
-        },
-        Arc::new(TermConfig { scroll_back: 1000 }),
-        "sudare",
-        "0.1.0",
-        Box::new(Vec::new()),
-    );
-
     let pty_system = NativePtySystem::default();
-
-    let pty = pty_system.openpty(PtySize {
-        rows: 10,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-
-    let mut cmd = CommandBuilder::new("sh");
-    cmd.args(["-c", "curl -s https://gist.githubusercontent.com/HaleTom/89ffe32783f89f403bba96bd7bcd1263/raw/e50a28ec54188d2413518788de6c6367ffcea4f7/print256colours.sh | bash"]);
-    let mut child = pty.slave.spawn_command(cmd).unwrap();
-    drop(pty.slave);
-
-    let (tx, rx) = mpsc::channel();
-    let reader = pty.master.try_clone_reader().unwrap();
-
-    thread::spawn(move || {
-        let mut br = BufReader::with_capacity(1024, reader);
-        let mut buffer = [0u8; 1024];
-        loop {
-            let n = br.read(&mut buffer[..]).unwrap();
-            if n == 0 {
-                //reader.try_wait().unwrap();
-                child.try_wait().unwrap();
-                break;
-            }
-
-            tx.send(Vec::from(&buffer[..n])).unwrap();
-        }
-    });
-
-    /////////////////
-    let mut tmp0 = String::new();
-    let mut tmp1 = String::new();
 
     let caps =
         Capabilities::new_with_hints(ProbeHints::new_from_env().mouse_reporting(Some(false)))?;
 
     let mut buf = BufferedTerminal::new(new_terminal(caps)?)?;
     buf.terminal().set_raw_mode()?;
-    //buf.terminal().enter_alternate_screen()?;
+    buf.terminal().enter_alternate_screen()?;
 
-    // buf.terminal().set_screen_size(ScreenSize {
-    //     rows: 10,
-    //     cols: 80,
-    //     xpixel: 0,
-    //     ypixel: 0,
-    // })?;
-
-    let mut ui_state = UiState::new(procfile, (buf.dimensions()));
+    let mut ui_state = UiState::new(procfile, buf.dimensions());
 
     loop {
         match buf.terminal().poll_input(Some(Duration::ZERO)) {
@@ -320,7 +543,9 @@ fn main() -> Result<(), Error> {
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char(c),
                     ..
-                }) if c.is_digit(10) => ui_state.select_process(c.to_digit(10).unwrap() as usize),
+                }) if c.is_digit(10) => {
+                    ui_state.select_process(&pty_system, c.to_digit(10).unwrap() as usize)
+                }
                 _ => {}
             },
             Ok(None) => {}
@@ -330,74 +555,8 @@ fn main() -> Result<(), Error> {
             }
         }
 
-        /*
-        {
-            let mut buffer = Vec::<u8>::new();
-
-            loop {
-                match rx.try_recv() {
-                    Ok(mut bytes) => {
-                        buffer.append(&mut bytes);
-                        if buffer.len() > 1024 {
-                            break;
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
-                }
-            }
-
-            if !buffer.is_empty() {
-                term.advance_bytes(&buffer);
-                buffer.clear();
-
-                //                buf.add_change(Change::ClearScreen(ColorAttribute::Default));
-                buf.add_change(Change::CursorPosition {
-                    x: Position::Absolute(20),
-                    y: Position::Absolute(20),
-                });
-
-                let screen = term.screen();
-                let (_, changes) = screen
-                    .lines_in_phys_range(screen.phys_range(&(0..10)))
-                    .iter()
-                    .fold(
-                        (CellAttributes::default(), Vec::<Change>::new()),
-                        |(a, mut xs), l| {
-                            l.visible_cells()
-                                .last()
-                                .map(|c| {
-                                    //let ys = &mut xs;
-                                    xs.extend(l.changes(&a));
-                                    xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
-                                    xs.push(Change::CursorPosition {
-                                        x: Position::Absolute(0),
-                                        y: Position::Relative(1),
-                                    });
-                                    // TODO: c.attrs().wrapped() ?
-                                    (c.attrs().clone(), xs.to_vec())
-                                })
-                                .unwrap_or({
-                                    xs.push(Change::ClearToEndOfLine(ColorAttribute::Default));
-                                    xs.push(Change::CursorPosition {
-                                        x: Position::Absolute(0),
-                                        y: Position::Relative(1),
-                                    });
-                                    (a, xs)
-                                })
-                        },
-                    );
-
-                buf.add_changes(changes.to_vec());
-
-                //print!("{} ", bytes.len());
-                buf.flush().unwrap();
-            }
-        }
-         */
-
         ui_state.render_to_screen(&mut buf);
-        buf.flush();
+        buf.flush().unwrap();
 
         sleep(Duration::from_millis(10));
     }
