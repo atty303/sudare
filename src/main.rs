@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 use std::fs::File;
-use std::io::{ErrorKind, Read};
-use std::ops::Deref;
+use std::io::Read;
 use std::string::ToString;
-use std::sync::mpsc::{Receiver, SendError, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::thread::{sleep, JoinHandle};
@@ -49,7 +48,6 @@ impl Process {
 }
 
 struct UiState {
-    procfile: Procfile,
     focused_window_index: usize,
     windows: Vec<UiWindow>,
     surface: Surface,
@@ -59,7 +57,6 @@ struct UiState {
 impl UiState {
     pub fn new(procfile: Procfile, dimension: (usize, usize)) -> UiState {
         UiState {
-            procfile: procfile.to_vec(),
             focused_window_index: 0,
             windows: procfile.into_iter().map(|it| UiWindow::new(it)).collect(),
             surface: Surface::new(dimension.0, dimension.1),
@@ -125,8 +122,6 @@ struct UiWindow {
     process_group: ProcessGroup,
     active_process_index: usize,
     pty_terminal: Option<PtyTerminal>,
-    width: usize,
-    height: usize,
 }
 
 impl UiWindow {
@@ -135,8 +130,6 @@ impl UiWindow {
             process_group,
             active_process_index: 0,
             pty_terminal: None,
-            width: 1,
-            height: 1,
         }
     }
 
@@ -147,9 +140,9 @@ impl UiWindow {
         index: usize,
     ) {
         if let Some(process) = self.process_group.members.get(index) {
-            if let Some(t) = &mut self.pty_terminal {
-                //                t.pty_process.kill().unwrap();
-            }
+            // if let Some(t) = &mut self.pty_terminal {
+            //     t.pty_process.kill().unwrap();
+            // }
             self.pty_terminal = None;
 
             self.active_process_index = index;
@@ -277,7 +270,7 @@ impl PtyTerminal {
     pub fn poll(&mut self) -> Option<Vec<Change>> {
         let buffer = self.pty_process.poll();
         if !buffer.is_empty() {
-            &self.terminal.advance_bytes(&buffer);
+            self.terminal.advance_bytes(&buffer);
         }
 
         let c = self.terminal.get_size();
@@ -359,7 +352,7 @@ impl PtyProcess {
                     if n == 0 {
                         break;
                     } else {
-                        tx.send(PtyMessage::Bytes(buffer[..n].to_vec()));
+                        tx.send(PtyMessage::Bytes(buffer[..n].to_vec())).unwrap();
                     }
                 }
                 log::info!("thread finished");
@@ -379,17 +372,17 @@ impl PtyProcess {
             Ok(Some(_)) => Ok(()),
             Ok(None) => self.child.kill(),
             Err(e) => Err(e),
-        }?;
-        if let Some(handle) = self.child_handle.take() {
-            let r = match handle.join() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(std::io::Error::new(ErrorKind::Other, format!("{:?}", e))),
-            };
-            self.child_handle = None;
-            r
-        } else {
-            Ok(())
         }
+        // if let Some(handle) = self.child_handle.take() {
+        //     let r = match handle.join() {
+        //         Ok(_) => Ok(()),
+        //         Err(e) => Err(std::io::Error::new(ErrorKind::Other, format!("{:?}", e))),
+        //     };
+        //     self.child_handle = None;
+        //     r
+        // } else {
+        //     Ok(())
+        // }
     }
 
     pub fn poll(&mut self) -> Vec<u8> {
@@ -432,24 +425,20 @@ impl PtyProcess {
 impl Drop for PtyProcess {
     fn drop(&mut self) {
         log::debug!("pty_process dropped");
-        {
-            let mut writer = self.pty.master.take_writer().unwrap();
-            if cfg!(target_os = "macos") {
-                sleep(Duration::from_millis(20));
-            }
-        }
 
-        match self.child.try_wait() {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => self.child.kill(),
-            Err(e) => Err(e),
+        let writer = self.pty.master.take_writer().unwrap();
+        if cfg!(target_os = "macos") {
+            sleep(Duration::from_millis(20));
         }
-        .unwrap();
+        drop(writer);
+
+        self.kill().unwrap();
 
         self.child.wait().unwrap();
 
         drop(&self.pty.master);
 
+        drop(&self.child_handle);
         // if let Some(handle) = self.child_handle.take() {
         //     handle.join().unwrap();
         // }
