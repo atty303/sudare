@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::ops::Range;
+use std::path::Path;
 use std::string::ToString;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{mpsc, Arc};
@@ -12,6 +14,7 @@ use std::time::Duration;
 use portable_pty::{
     Child, CommandBuilder, ExitStatus, NativePtySystem, PtyPair, PtySize, PtySystem,
 };
+use regex::Regex;
 use termwiz::caps::{Capabilities, ProbeHints};
 use termwiz::cell::{AttributeChange, CellAttributes};
 use termwiz::color::{AnsiColor, ColorAttribute};
@@ -25,6 +28,54 @@ use wezterm_term::{ScrollbackOrVisibleRowIndex, TerminalConfiguration, TerminalS
 
 type Procfile = Vec<ProcessGroup>;
 
+fn parse_procfile(path: &Path) -> std::io::Result<Procfile> {
+    let re: Regex = Regex::new(r"^(.+)\[(.+)\]$").unwrap();
+    let reader = BufReader::new(File::open(path)?);
+    let (ordered, map) = reader
+        .lines()
+        .map(|l| l.unwrap())
+        .filter(|l| !l.starts_with("#") || l.contains(":"))
+        .map(|l| {
+            let (title, cmd) = {
+                let mut it = l.splitn(2, ":");
+                (it.next().unwrap(), it.next().unwrap())
+            };
+            let (a, b) = re
+                .captures(title)
+                .map(|cap| (cap.get(1).unwrap().as_str(), cap.get(2).unwrap().as_str()))
+                .unwrap_or((title, "default"));
+            (a.to_string(), b.to_string(), cmd.trim().to_string())
+        })
+        .fold(
+            (
+                Vec::<String>::new(),
+                BTreeMap::<String, Vec<(String, String)>>::new(),
+            ),
+            |mut acc, (a, b, c)| {
+                if !acc.0.contains(&a) {
+                    acc.0.push(a.clone());
+                }
+                acc.1.entry(a).or_default().push((b, c));
+                acc
+            },
+        );
+    let r: Procfile = ordered
+        .iter()
+        .map(|title| (title, map.get(title).unwrap()))
+        .map(|(title, members)| ProcessGroup {
+            title: title.clone(),
+            members: vec![Process::Null]
+                .into_iter()
+                .chain(members.iter().map(|(label, cmd)| Process::Command {
+                    title: label.clone(),
+                    argv: cmd.clone(),
+                }))
+                .collect(),
+        })
+        .collect();
+    Ok(r)
+}
+
 #[derive(Debug, Clone)]
 struct ProcessGroup {
     title: String,
@@ -37,12 +88,12 @@ enum Process {
     Command { title: String, argv: String },
 }
 
-impl Process {
-    const DEFAULT_TITLE: &str = "default";
+const DEFAULT_TITLE: &str = "disable";
 
+impl Process {
     pub fn title(&self) -> String {
         match self {
-            Process::Null => Process::DEFAULT_TITLE.to_string(),
+            Process::Null => DEFAULT_TITLE.to_string(),
             Process::Command { title, argv: _ } => title.to_string(),
         }
     }
@@ -508,51 +559,17 @@ impl Drop for PtyProcess {
 }
 
 fn main() -> Result<(), Error> {
-    simplelog::WriteLogger::init(
-        simplelog::LevelFilter::Debug,
-        simplelog::Config::default(),
-        File::create("sudare.log").unwrap(),
-    )
-    .unwrap();
-
-    let procfile = vec![
-        ProcessGroup {
-            title: String::from("foo"),
-            members: vec![
-                Process::Null,
-                Process::Command {
-                    title: "cloudflare".to_string(),
-                    argv: "ping 1.1.1.1".to_string(),
-                },
-                Process::Command {
-                    title: "google".to_string(),
-                    argv: "ping 8.8.8.8".to_string(),
-                },
-            ],
-        },
-        ProcessGroup {
-            title: String::from("bar"),
-            members: vec![
-                Process::Null,
-                Process::Command {
-                    title: "cloudflare".to_string(),
-                    argv: "ping 1.1.1.1".to_string(),
-                },
-                Process::Command {
-                    title: "google".to_string(),
-                    argv: "ping 8.8.8.8".to_string(),
-                },
-                Process::Command {
-                    title: "echo".to_string(),
-                    argv: "echo Hello world".to_string(),
-                },
-                Process::Command {
-                    title: "cat".to_string(),
-                    argv: "cat /proc/cpuinfo".to_string(),
-                },
-            ],
-        },
-    ];
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        panic!("You must specify path to Procfile");
+    }
+    let procfile = parse_procfile(Path::new(&args[1].as_str()))?;
+    // simplelog::WriteLogger::init(
+    //     simplelog::LevelFilter::Debug,
+    //     simplelog::Config::default(),
+    //     File::create("sudare.log").unwrap(),
+    // )
+    // .unwrap();
 
     let pty_system = NativePtySystem::default();
 
