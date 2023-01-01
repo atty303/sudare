@@ -1,20 +1,21 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, BufWriter, Read};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::string::ToString;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{mpsc, Arc};
-use std::thread;
 use std::thread::{sleep, JoinHandle};
 use std::time::Duration;
+use std::{io, thread};
 
 use portable_pty::{
     Child, CommandBuilder, ExitStatus, NativePtySystem, PtyPair, PtySize, PtySystem,
 };
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use termwiz::caps::{Capabilities, ProbeHints};
 use termwiz::cell::{AttributeChange, CellAttributes};
 use termwiz::color::{AnsiColor, ColorAttribute};
@@ -67,7 +68,7 @@ fn parse_procfile(path: &Path) -> std::io::Result<Procfile> {
             members: vec![Process::Null]
                 .into_iter()
                 .chain(members.iter().map(|(label, cmd)| Process::Command {
-                    title: label.clone(),
+                    label: label.clone(),
                     argv: cmd.clone(),
                 }))
                 .collect(),
@@ -85,21 +86,28 @@ struct ProcessGroup {
 #[derive(Debug, Clone)]
 enum Process {
     Null,
-    Command { title: String, argv: String },
+    Command { label: String, argv: String },
 }
 
 const DEFAULT_TITLE: &str = "disable";
 
 impl Process {
-    pub fn title(&self) -> String {
+    pub fn label(&self) -> String {
         match self {
             Process::Null => DEFAULT_TITLE.to_string(),
-            Process::Command { title, argv: _ } => title.to_string(),
+            Process::Command { label, argv: _ } => label.to_string(),
         }
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct SavedState {
+    focused_group: String,
+    active_processes: BTreeMap<String, String>,
+}
+
 struct UiState {
+    procfile_hash: String,
     focused_window_index: usize,
     windows: Vec<UiWindow>,
     surface: Surface,
@@ -107,8 +115,9 @@ struct UiState {
 }
 
 impl UiState {
-    pub fn new(procfile: Procfile, dimension: (usize, usize)) -> UiState {
+    pub fn new(procfile_hash: String, procfile: Procfile, dimension: (usize, usize)) -> UiState {
         UiState {
+            procfile_hash,
             focused_window_index: 0,
             windows: procfile.into_iter().map(|it| UiWindow::new(it)).collect(),
             surface: Surface::new(dimension.0, dimension.1),
@@ -187,6 +196,82 @@ impl UiState {
         let diff = screen.diff_screens(&alt_screen);
         screen.add_changes(diff);
     }
+
+    fn find_window_by_title(&mut self, title: &String) -> Option<(usize, &mut UiWindow)> {
+        self.windows
+            .iter_mut()
+            .enumerate()
+            .find(|(_, w)| w.process_group.title == *title)
+    }
+
+    fn save_state(&self) -> io::Result<()> {
+        let active_processes = self.windows.iter().fold(BTreeMap::new(), |mut acc, it| {
+            if let Some(p) = it.get_active() {
+                acc.insert(it.process_group.title.clone(), p.label());
+            }
+            acc
+        });
+
+        let state = SavedState {
+            focused_group: self
+                .windows
+                .get(self.focused_window_index)
+                .unwrap()
+                .process_group
+                .title
+                .clone(),
+            active_processes,
+        };
+
+        std::fs::create_dir_all(UiState::cache_dir())?;
+
+        let writer = BufWriter::new(File::create(self.state_file_path())?);
+        serde_json::to_writer(writer, &state)?;
+        Ok(())
+    }
+
+    fn load_state(&mut self, pty_system: &dyn PtySystem) -> io::Result<()> {
+        if let Ok(file) = File::open(self.state_file_path()) {
+            let reader = BufReader::new(file);
+            let state: SavedState = serde_json::from_reader(reader)?;
+
+            if let Some((i, _)) = self.find_window_by_title(&state.focused_group) {
+                self.focused_window_index = i
+            }
+
+            let dim = self.surface.dimensions();
+            state.active_processes.iter().for_each(|(title, label)| {
+                if let Some((_, w)) = self.find_window_by_title(title) {
+                    if let Some((i, _)) = w
+                        .process_group
+                        .members
+                        .iter()
+                        .enumerate()
+                        .find(|(_, p)| p.label() == *label)
+                    {
+                        w.set_active(pty_system, dim, i);
+                    }
+                }
+            });
+
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn state_file_path(&self) -> PathBuf {
+        let mut filename = self.procfile_hash.clone();
+        filename.push_str(".json");
+        UiState::cache_dir().join(Path::new(&filename))
+    }
+
+    fn cache_dir() -> PathBuf {
+        let cache_home: String = std::env::var("XDG_CACHE_HOME")
+            .or_else(|_e| std::env::var("HOME").map(|v| v + "/.cache"))
+            .unwrap();
+        Path::new((cache_home + "/sudare").as_str()).to_path_buf()
+    }
 }
 
 struct UiWindow {
@@ -204,6 +289,14 @@ impl UiWindow {
         }
     }
 
+    pub fn get_active(&self) -> Option<&Process> {
+        match self.process_group.members.get(self.active_process_index) {
+            Some(Process::Null) => None,
+            Some(p) => Some(p),
+            None => None,
+        }
+    }
+
     pub fn set_active(
         &mut self,
         pty_system: &dyn PtySystem,
@@ -218,7 +311,7 @@ impl UiWindow {
 
             self.active_process_index = index;
 
-            if let Process::Command { title: _, argv } = process {
+            if let Process::Command { label: _, argv } = process {
                 if let Ok(pp) = PtyProcess::new(pty_system, dimension, argv) {
                     self.pty_terminal = Some(PtyTerminal::new(pp, dimension));
                 }
@@ -279,7 +372,7 @@ impl UiWindow {
                 } else {
                     ""
                 };
-                format!("{}{}:{}", indicator, i, it.title())
+                format!("{}{}:{}", indicator, i, it.label())
             })
             .collect::<Vec<_>>()
             .join(" ");
@@ -558,18 +651,31 @@ impl Drop for PtyProcess {
     }
 }
 
+use sha2::Digest;
+use std::os::unix::ffi::OsStrExt;
+
 fn main() -> Result<(), Error> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        panic!("You must specify path to Procfile");
-    }
-    let procfile = parse_procfile(Path::new(&args[1].as_str()))?;
     // simplelog::WriteLogger::init(
     //     simplelog::LevelFilter::Debug,
     //     simplelog::Config::default(),
     //     File::create("sudare.log").unwrap(),
     // )
     // .unwrap();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        panic!("You must specify path to Procfile");
+    }
+
+    let procfile_path = Path::new(&args[1].as_str()).canonicalize()?;
+    let procfile_hash = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(procfile_path.as_os_str().as_bytes());
+        let hash = hasher.finalize();
+        format!("{:x}", hash)
+    };
+
+    let procfile = parse_procfile(procfile_path.as_path())?;
 
     let pty_system = NativePtySystem::default();
 
@@ -580,7 +686,8 @@ fn main() -> Result<(), Error> {
     buf.terminal().set_raw_mode()?;
     buf.terminal().enter_alternate_screen()?;
 
-    let mut ui_state = UiState::new(procfile, buf.dimensions());
+    let mut ui_state = UiState::new(procfile_hash, procfile, buf.dimensions());
+    ui_state.load_state(&pty_system)?;
 
     loop {
         match buf.terminal().poll_input(Some(Duration::ZERO)) {
@@ -594,7 +701,10 @@ fn main() -> Result<(), Error> {
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Escape,
                     ..
-                }) => break,
+                }) => {
+                    ui_state.save_state()?;
+                    break;
+                }
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char('n'),
                     ..
