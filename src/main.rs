@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::Read;
+use std::ops::Range;
 use std::string::ToString;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{mpsc, Arc};
@@ -20,7 +21,7 @@ use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{new_terminal, Terminal};
 use termwiz::Error;
 use wezterm_term::color::ColorPalette;
-use wezterm_term::{TerminalConfiguration, TerminalSize, VisibleRowIndex};
+use wezterm_term::{ScrollbackOrVisibleRowIndex, TerminalConfiguration, TerminalSize};
 
 type Procfile = Vec<ProcessGroup>;
 
@@ -65,6 +66,9 @@ impl UiState {
     }
 
     pub fn previous_window(&mut self) {
+        if let Some(group) = self.windows.get_mut(self.focused_window_index) {
+            group.reset_scroll();
+        }
         self.focused_window_index = if self.focused_window_index > 0 {
             self.focused_window_index - 1
         } else {
@@ -73,6 +77,9 @@ impl UiState {
     }
 
     pub fn next_window(&mut self) {
+        if let Some(group) = self.windows.get_mut(self.focused_window_index) {
+            group.reset_scroll();
+        }
         self.focused_window_index =
             if self.focused_window_index < self.windows.len().saturating_sub(1) {
                 self.focused_window_index + 1
@@ -84,6 +91,18 @@ impl UiState {
     pub fn select_process(&mut self, pty_system: &dyn PtySystem, index: usize) {
         if let Some(group) = self.windows.get_mut(self.focused_window_index) {
             group.set_active(pty_system, self.surface.dimensions(), index);
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        if let Some(group) = self.windows.get_mut(self.focused_window_index) {
+            group.scroll_up();
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if let Some(group) = self.windows.get_mut(self.focused_window_index) {
+            group.scroll_down();
         }
     }
 
@@ -110,6 +129,7 @@ impl UiState {
                 y + h
             });
 
+        // TODO: これをするとチラつくのでやらないで済む方法がないか
         screen.add_change(Change::ClearScreen(ColorAttribute::Default));
 
         // Now compute a delta and apply it to the actual screen
@@ -152,6 +172,24 @@ impl UiWindow {
                     self.pty_terminal = Some(PtyTerminal::new(pp, dimension));
                 }
             }
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        if let Some(t) = &mut self.pty_terminal {
+            t.scroll_up();
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        if let Some(t) = &mut self.pty_terminal {
+            t.scroll_down();
+        }
+    }
+
+    pub fn reset_scroll(&mut self) {
+        if let Some(t) = &mut self.pty_terminal {
+            t.reset_scroll();
         }
     }
 
@@ -230,6 +268,7 @@ impl TerminalConfiguration for TermConfig {
 struct PtyTerminal {
     terminal: wezterm_term::Terminal,
     pty_process: PtyProcess,
+    scroll_offset: isize,
 }
 
 impl PtyTerminal {
@@ -251,7 +290,22 @@ impl PtyTerminal {
         Self {
             terminal,
             pty_process,
+            scroll_offset: 0,
         }
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset -= 1
+    }
+
+    pub fn scroll_down(&mut self) {
+        if self.scroll_offset < 0 {
+            self.scroll_offset += 1
+        }
+    }
+
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
     }
 
     pub fn resize_soft(&mut self, w: usize, h: usize) {
@@ -274,10 +328,15 @@ impl PtyTerminal {
         }
 
         let c = self.terminal.get_size();
+        let visible_range = Range {
+            start: self.scroll_offset as ScrollbackOrVisibleRowIndex,
+            end: (self.scroll_offset + c.rows as isize) as ScrollbackOrVisibleRowIndex,
+        };
+
         let screen = self.terminal.screen();
         //screen.physical_rows
         let (_, changes) = screen
-            .lines_in_phys_range(screen.phys_range(&(0..c.rows as VisibleRowIndex)))
+            .lines_in_phys_range(screen.scrollback_or_visible_range(&visible_range))
             .iter()
             .fold(
                 (CellAttributes::default(), Vec::<Change>::new()),
@@ -427,9 +486,6 @@ impl Drop for PtyProcess {
         log::debug!("pty_process dropped");
 
         let writer = self.pty.master.take_writer().unwrap();
-        if cfg!(target_os = "macos") {
-            sleep(Duration::from_millis(20));
-        }
         drop(writer);
 
         self.kill().unwrap();
@@ -485,6 +541,10 @@ fn main() -> Result<(), Error> {
                     title: "echo".to_string(),
                     argv: "echo Hello world".to_string(),
                 },
+                Process::Command {
+                    title: "cat".to_string(),
+                    argv: "cat /proc/cpuinfo".to_string(),
+                },
             ],
         },
     ];
@@ -534,6 +594,18 @@ fn main() -> Result<(), Error> {
                     ..
                 }) if c.is_digit(10) => {
                     ui_state.select_process(&pty_system, c.to_digit(10).unwrap() as usize)
+                }
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('k'),
+                    ..
+                }) => {
+                    ui_state.scroll_up();
+                }
+                InputEvent::Key(KeyEvent {
+                    key: KeyCode::Char('j'),
+                    ..
+                }) => {
+                    ui_state.scroll_down();
                 }
                 _ => {}
             },
