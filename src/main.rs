@@ -295,12 +295,17 @@ impl PtyTerminal {
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset -= 1
+        if self.scroll_offset
+            > -((self.terminal.screen().scrollback_rows() - self.terminal.screen().physical_rows)
+                as isize)
+        {
+            self.scroll_offset -= 1;
+        }
     }
 
     pub fn scroll_down(&mut self) {
         if self.scroll_offset < 0 {
-            self.scroll_offset += 1
+            self.scroll_offset += 1;
         }
     }
 
