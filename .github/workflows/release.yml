@@ -62,8 +62,8 @@ jobs:
         id: create-release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ needs.release.outputs.tag }}
-          name: ${{ jobs.release.outputs.tag }}
+          tag_name: v${{ steps.version.outputs.value }}
+          name: ${{ steps.version.outputs.value }}
           body: ${{ steps.tag_version.outputs.changelog }}
     outputs:
       tag: v${{ steps.version.outputs.value }}
