@@ -3,9 +3,36 @@ name: Debug
 on: workflow_dispatch
 
 jobs:
-  debug:
-    runs-on: macos-latest
+#  debug:
+#    runs-on: macos-latest
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Setup tmate session
+#        uses: mxschmitt/action-tmate@v3
+
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.2.0
+      - uses: actions-rs/toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+      - run: |
+          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)/release"
+          echo $target_dir
