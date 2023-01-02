@@ -17,7 +17,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: true
       - name: Stop workflow if there hasn't been any new commit
-        if: ${{ !steps.tag_version.new_tag }}
+        if: ${{ steps.tag_version.new_tag == undefined }}
         run: exit 1
       - name: Bump version of Cargo.toml
         run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.new_version }}"' Cargo.toml
