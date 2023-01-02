@@ -607,7 +607,7 @@ impl PtyProcess {
             match self.receiver.try_recv() {
                 Ok(PtyMessage::Bytes(mut bytes)) => {
                     buffer.append(&mut bytes);
-                    if buffer.len() > 1024 {
+                    if buffer.len() > 16384 {
                         break;
                     }
                 }
