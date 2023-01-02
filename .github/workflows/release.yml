@@ -20,7 +20,7 @@ jobs:
         if: ${{ !steps.tag_version.outputs.new_tag }}
         run: exit 1
       - name: Bump version of Cargo.toml
-        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.outputs.new_version }}"' Cargo.toml
+        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
       - name: Commit and tag the new version
         uses: EndBug/add-and-commit@v9
         with:
