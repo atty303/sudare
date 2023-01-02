@@ -2,8 +2,11 @@
 name = "sudare"
 version = "0.1.4"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license-file = "LICENSE"
+description = "Manage Procfile-based applications with terminal multiplexer"
+homepage = "https://github.com/atty303/sudare"
+readme = "README.md"
+categories = ["command-line-utilities"]
 
 [dependencies]
 "termwiz" = { git="https://github.com/wez/wezterm", tag="20221119-145034-49b9839f", features=["use_image"] }
