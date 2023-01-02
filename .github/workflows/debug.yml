@@ -34,6 +34,26 @@ jobs:
         with:
           command: build
           args: --release --target ${{ matrix.target }}
-      - run: |
-          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)/release"
-          echo $target_dir
+      - name: Create archive
+        id: archive
+        run: |
+          project=sudare
+          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)/${{ matrix.target }}/release"
+          archive="${project}-${{ matrix.target }}"
+          archive_path="$(pwd)/${archive}.tar.gz"
+          tempdir=$(mktemp -d)
+          cp ${target_dir}/${project} ${tempdir}
+          ( cd ${tempdir} && tar acf ${archive_path} ${project} )
+          rm -rf $tempdir
+          echo "archive_path=${archive_path}" >>$GITHUB_OUTPUT
+      - name: Release
+        id: upload_asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.archive.outputs.archive_path }}
+          fail_on_unmatched_files: true
+          tag_name: v0.1.4
+          name: 0.1.4
+      - run:
+          echo ${{ steps.upload_asset.outputs.assets }}
+        
