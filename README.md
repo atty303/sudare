@@ -24,8 +24,8 @@ boolean[false]: false
 
 | Architecture Triple      | Operating System      |
 | ------------------------ | --------------------- |
-| aarch64-apple-darwin     | MacOS (Apple Silicon) |
-| x86_64-apple-darwin      | MacOS (Intel)         |
+| aarch64-apple-darwin     | macOS (Apple Silicon) |
+| x86_64-apple-darwin      | macOS (Intel)         |
 | x86_64-unknown-linux-gnu | Linux (Intel)         |
 
 ## via Homebrew
@@ -33,3 +33,20 @@ boolean[false]: false
 ```
 brew install atty303/tap/sudare
 ```
+
+# Usage
+
+```
+sudare <procfile>
+```
+
+## Keymap
+
+| Key | Function               |
+| --- | ---------------------- |
+| ESC | Exit                   |
+| n   | Next process group     |
+| p   | Previous process group |
+| 0-9 | Select active process  |
+| j   | Scroll up              |
+| k   | Scroll down            |
