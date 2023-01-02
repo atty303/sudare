@@ -163,12 +163,14 @@ impl UiState {
         if let Some(group) = self.windows.get_mut(self.focused_window_index) {
             group.scroll_up();
         }
+        self.repaint = true;
     }
 
     pub fn scroll_down(&mut self) {
         if let Some(group) = self.windows.get_mut(self.focused_window_index) {
             group.scroll_down();
         }
+        self.repaint = true;
     }
 
     pub fn render_to_screen(&mut self, screen: &mut Surface) {
