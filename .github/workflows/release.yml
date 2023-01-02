@@ -120,11 +120,10 @@ jobs:
           files: ${{ steps.archive.outputs.archive_path }}
           fail_on_unmatched_files: true
           tag_name: ${{ needs.release.outputs.tag }}
-#          name: ${{ jobs.release.outputs.tag }}
 
-      - id: generate_unique_id
-        run: |
-          echo "${{ toJSON(matrix) }}" >.atrix.txt
+      - run: |
+          echo "${{ toJSON(matrix) }}" >matrix.txt
+      - if: generate_unique_id
           echo "result=${{ hashFiles('matrix.txt') }}" >>$GITHUB_OUTPUT
       - id: generate_outputs
         run: |
