@@ -37,7 +37,7 @@ jobs:
       new_tag: ${{ steps.tag_version.outputs.new_tag }}
 
   upload-assets:
-    needs: create-release
+    needs: create_release
     strategy:
       matrix:
         include:
