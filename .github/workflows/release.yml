@@ -3,7 +3,14 @@ name: Release new version
 permissions:
   contents: write
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
+        required: false
+        default: false
 
 jobs:
   create_release:
@@ -12,6 +19,9 @@ jobs:
       - uses: actions/checkout@v3
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
       - name: Calculate bumped version
         id: tag_version
         uses: mathieudutour/github-tag-action@v6.1
