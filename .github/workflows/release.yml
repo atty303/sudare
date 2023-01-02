@@ -66,6 +66,7 @@ jobs:
           name: ${{ steps.version.outputs.value }}
           body: ${{ steps.tag_version.outputs.changelog }}
     outputs:
+      version: ${{ steps.version.outputs.value }}
       tag: v${{ steps.version.outputs.value }}
 
   build:
@@ -83,14 +84,14 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
-
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           target: ${{ matrix.target }}
           override: true
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.2.0
 
       - uses: actions-rs/cargo@v1
         with:
@@ -124,20 +125,31 @@ jobs:
       - run: echo "${{ toJSON(matrix) }}" >matrix.txt
       - id: generate_unique_id
         run: echo "result=${{ hashFiles('matrix.txt') }}" >>$GITHUB_OUTPUT
-      - run: echo "${{ steps.archive.outputs.archive_sha256 }} ${{ fromJSON(steps.upload_asset.outputs.assets)[0].browser_download_url }}" >outputs.txt
+      - run: echo "${{ matrix.target }} ${{ steps.archive.outputs.archive_sha256 }} ${{ fromJSON(steps.upload_asset.outputs.assets)[0].browser_download_url }}" >outputs.txt
       - name: Upload outputs
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: outputs-${{ steps.generate_unique_id.outputs.result }}
           path: ${{ github.workspace }}/outputs.txt
 
   taps:
-    needs: [build]
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v3
         with:
           path: outputs
-      - run: |
-          ls outputs/*
-          cat outputs/*/*
+      - id: payload
+        run: |
+          echo -n "{" >payload.json
+          cat outputs/*/* |  sed -e 's/\([^ ]*\) \([^ ]*\) \(.*\)/"\1":{"sha256":"\2","url":"\3"}/' | tr '\n' ',' | sed 's/,$//' >>payload.json
+          echo -n "}" >>payload.json
+          cat payload.json
+          echo "payload_json=$(cat payload.json)" >>$GITHUB_OUTPUT
+
+      - uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          repository: atty303/homebrew-tap
+          event-type: update-${{ env.PROJECT_NAME }}
+          client-payload: ${{ steps.payload.outputs.payload_json }}
