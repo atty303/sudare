@@ -59,10 +59,11 @@ jobs:
           tag_push: --force
 
       - name: Create a GitHub release
-        uses: ncipollo/release-action@v1
+        id: create-release
+        uses: softprops/action-gh-release@v1
         with:
-          tag: v${{ steps.version.outputs.value }}
-          name: ${{ steps.version.outputs.value }}
+          tag_name: v${{ needs.release.outputs.tag }}
+          name: ${{ jobs.release.outputs.tag }}
           body: ${{ steps.tag_version.outputs.changelog }}
     outputs:
       tag: v${{ steps.version.outputs.value }}
