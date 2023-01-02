@@ -551,6 +551,8 @@ impl PtyProcess {
 
         let mut cmd = CommandBuilder::new("sh");
         cmd.args(["-c", argv]);
+        let current_dir = std::env::current_dir()?;
+        cmd.cwd(current_dir.as_os_str());
         let maybe_child = pty.slave.spawn_command(cmd);
         drop(&pty.slave);
         let child = maybe_child?;
