@@ -1,26 +1,43 @@
-name: Release
+name: Release new version
 
 permissions:
   contents: write
 
-on:
-  push:
-    tags:
-      - v[0-9]+.*
+on: workflow_dispatch
 
 jobs:
-  create-release:
+  create_release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: taiki-e/create-gh-release-action@v1
+      - name: Calculate bumped version
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.1
         with:
-          # (optional) Path to changelog.
-          # changelog: CHANGELOG.md
-          # (required) GitHub token for creating GitHub Releases.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # github_token: ${{ secrets.GITHUB_TOKEN }}
+          dry_run: true
+      - name: Stop workflow if there hasn't been any new commit
+        if: ${{ !steps.tag_version.new_tag }}
+        run: exit 1
+      - name: Bump version of Cargo.toml
+        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.new_version }}"' Cargo.toml
+      - name: Commit and tag the new version
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: Cargo.toml
+          message: Bump version to ${{ steps.tag_version.new_version }}
+          tag: ${{ steps.tag_version.new_tag }}
+      - name: Create a GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          body: ${{ steps.tag_version.outputs.changelog }}
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
 
   upload-assets:
+    needs: create-release
     strategy:
       matrix:
         include:
@@ -37,10 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.2.0
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
-          # Note that glob pattern is not supported yet.
           bin: sudare
-          # (optional) Target triple, default is host triple.
           target: ${{ matrix.target }}
-          # (required) GitHub token for uploading assets to GitHub Releases.
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: refs/tags/${{ needs.create_release.outputs.new_tag }}
