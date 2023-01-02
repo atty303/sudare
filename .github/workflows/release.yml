@@ -17,16 +17,16 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: true
       - name: Stop workflow if there hasn't been any new commit
-        if: ${{ steps.tag_version.new_tag == undefined }}
+        if: ${{ !steps.tag_version.outputs.new_tag }}
         run: exit 1
       - name: Bump version of Cargo.toml
-        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.new_version }}"' Cargo.toml
+        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.outputs.new_version }}"' Cargo.toml
       - name: Commit and tag the new version
         uses: EndBug/add-and-commit@v9
         with:
           add: Cargo.toml
-          message: Bump version to ${{ steps.tag_version.new_version }}
-          tag: ${{ steps.tag_version.new_tag }}
+          message: Bump version to ${{ steps.tag_version.outputs.new_version }}
+          tag: ${{ steps.tag_version.outputs.new_tag }}
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
         with:
