@@ -1,5 +1,6 @@
 ping[google]: ping 8.8.8.8
 ping[cloudflare]: ping 1.1.1.1
+time: while true; do date; sleep 1; done
 echo[hello]: echo Hello, world!
 echo[good-by]: echo Good-bye world!
 boolean[true]: true
