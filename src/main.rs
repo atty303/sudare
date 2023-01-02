@@ -112,6 +112,7 @@ struct UiState {
     windows: Vec<UiWindow>,
     surface: Surface,
     min_window_height: usize,
+    repaint: bool,
 }
 
 impl UiState {
@@ -122,6 +123,7 @@ impl UiState {
             windows: procfile.into_iter().map(|it| UiWindow::new(it)).collect(),
             surface: Surface::new(dimension.0, dimension.1),
             min_window_height: 2,
+            repaint: true,
         }
     }
 
@@ -133,7 +135,8 @@ impl UiState {
             self.focused_window_index - 1
         } else {
             0
-        }
+        };
+        self.repaint = true;
     }
 
     pub fn next_window(&mut self) {
@@ -146,12 +149,14 @@ impl UiState {
             } else {
                 self.focused_window_index
             };
+        self.repaint = true;
     }
 
     pub fn select_process(&mut self, pty_system: &dyn PtySystem, index: usize) {
         if let Some(group) = self.windows.get_mut(self.focused_window_index) {
             group.set_active(pty_system, self.surface.dimensions(), index);
         }
+        self.repaint = true;
     }
 
     pub fn scroll_up(&mut self) {
@@ -189,8 +194,10 @@ impl UiState {
                 y + h
             });
 
-        // TODO: これをするとチラつくのでやらないで済む方法がないか
-        screen.add_change(Change::ClearScreen(ColorAttribute::Default));
+        if self.repaint {
+            screen.add_change(Change::ClearScreen(ColorAttribute::Default));
+            self.repaint = false;
+        }
 
         // Now compute a delta and apply it to the actual screen
         let diff = screen.diff_screens(&alt_screen);
