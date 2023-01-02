@@ -34,6 +34,9 @@ jobs:
         with:
           command: build
           args: --release --target ${{ matrix.target }}
+      - name: Install coreutils for macOS
+        if: matrix.os == 'macos-latest'
+        run: brew install coreutils
       - name: Create archive
         id: archive
         run: |
@@ -46,6 +49,7 @@ jobs:
           ( cd ${tempdir} && tar acf ${archive_path} ${project} )
           rm -rf $tempdir
           echo "archive_path=${archive_path}" >>$GITHUB_OUTPUT
+          echo "archive_sha256=$(sha256sum README.md | cut -d ' ' -f 1)" >>$GITHUB_OUTPUT
       - name: Release
         id: upload_asset
         uses: softprops/action-gh-release@v1
@@ -54,5 +58,25 @@ jobs:
           fail_on_unmatched_files: true
           tag_name: v0.1.3
           name: 0.1.3
-      - run:
-          echo ${{ steps.upload_asset.outputs.assets }}
+      - id: generate_unique_id
+        run: |
+          echo '${{ toJSON(matrix) }}' > ./matrix.txt
+          echo '::set-output name=result::${{ hashFiles('./matrix.txt') }}'
+      - id: generate_outputs
+        run: |
+          echo "${{ steps.archive.outputs.archive_sha256 }} ${{ fromJSON(steps.upload_asset.outputs.assets)[0].browser_download_url }}" >outputs.txt
+      - name: Upload outputs
+        uses: actions/upload-artifact@v2
+        with:
+          name: outputs-${{ steps.generate_unique_id.outputs.result }}
+          path: ${{ github.workspace }}/outputs.txt
+
+  taps:
+    needs: [build]
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          path: outputs
+      - run: |
+          ls outputs
+          cat outputs/*
