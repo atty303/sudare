@@ -21,17 +21,19 @@ jobs:
         run: exit 1
       - name: Bump version of Cargo.toml
         run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
+      - name: Update Cargo.lock
+        run: cargo update -p sudare
       - name: Commit and tag the new version
         uses: EndBug/add-and-commit@v9
         with:
-          add: Cargo.toml
+          add: Cargo.toml Cargo.lock
           message: Bump version to ${{ steps.tag_version.outputs.new_version }}
           tag: ${{ steps.tag_version.outputs.new_tag }}
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.tag_version.outputs.new_tag }}
-          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          name: ${{ steps.tag_version.outputs.new_version }}
           body: ${{ steps.tag_version.outputs.changelog }}
     outputs:
       new_tag: ${{ steps.tag_version.outputs.new_tag }}
