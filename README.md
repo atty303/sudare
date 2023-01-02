@@ -20,7 +20,15 @@ boolean[false]: false
 
 # Install
 
-## Homebrew (Linux/MacOS)
+## Supported Architectures
+
+| Architecture Triple      | Operating System      |
+| ------------------------ | --------------------- |
+| aarch64-apple-darwin     | MacOS (Apple Silicon) |
+| x86_64-apple-darwin      | MacOS (Intel)         |
+| x86_64-unknown-linux-gnu | Linux (Intel)         |
+
+## via Homebrew
 
 ```
 brew install atty303/tap/sudare
