@@ -3,72 +3,144 @@ name: Release new version
 permissions:
   contents: write
 
+env:
+  PROJECT_NAME: sudare
+
 on:
   workflow_dispatch:
     inputs:
-      debug_enabled:
-        type: boolean
-        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
+      version_override:
+        type: string
+        description: 'Override version'
         required: false
-        default: false
 
 jobs:
-  create_release:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
-      - name: Calculate bumped version
+
+#      - name: Setup tmate session
+#        uses: mxschmitt/action-tmate@v3
+
+      - name: Calculate new version
         id: tag_version
+        if: ${{ !inputs.version_override }}
         uses: mathieudutour/github-tag-action@v6.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: true
+
+      - uses: haya14busa/action-cond@v1
+        id: version
+        with:
+          cond: ${{ !inputs.version_override }}
+          if_true: ${{ steps.tag_version.outputs.new_version }}
+          if_false: ${{ inputs.version_override }}
+
       - name: Stop workflow if there hasn't been any new commit
-        if: ${{ !steps.tag_version.outputs.new_tag }}
+        if: ${{ !steps.version.outputs.value }}
         run: exit 1
+
       - name: Bump version of Cargo.toml
-        run: sed -i -e 's/^version = ".*"$/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
-      - name: Update Cargo.lock
-        run: cargo update -p sudare
+        run: |
+          sed -i -e 's/^version = ".*"$/version = "${{ steps.version.outputs.value }}"/' Cargo.toml
+          cargo update -p ${PROJECT_NAME} --offline
+
       - name: Commit and tag the new version
         uses: EndBug/add-and-commit@v9
         with:
           add: Cargo.toml Cargo.lock
-          message: Bump version to ${{ steps.tag_version.outputs.new_version }}
-          tag: ${{ steps.tag_version.outputs.new_tag }}
+          message: Bump version to ${{ steps.version.outputs.value }}
+          tag: v${{ steps.version.outputs.value }} --force
+          tag_push: --force
+
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ steps.tag_version.outputs.new_tag }}
-          name: ${{ steps.tag_version.outputs.new_version }}
+          tag: v${{ steps.version.outputs.value }}
+          name: ${{ steps.version.outputs.value }}
           body: ${{ steps.tag_version.outputs.changelog }}
     outputs:
-      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      tag: v${{ steps.version.outputs.value }}
 
-  upload-assets:
-    needs: create_release
+  build:
+    needs: release
     strategy:
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.2.0
-      - uses: taiki-e/upload-rust-binary-action@v1
+
+      - uses: actions-rs/toolchain@v1
         with:
-          bin: sudare
+          toolchain: stable
           target: ${{ matrix.target }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          ref: refs/tags/${{ needs.create_release.outputs.new_tag }}
+          override: true
+
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+
+      - name: Install coreutils for macOS
+        if: matrix.os == 'macos-latest'
+        run: brew install coreutils
+      - name: Create archive
+        id: archive
+        run: |
+          target_dir="$(cargo metadata --format-version=1 --no-deps | jq -r .target_directory)/${{ matrix.target }}/release"
+          archive="${PROJECT_NAME}-${{ matrix.target }}"
+          archive_path="$(pwd)/${archive}.tar.gz"
+          tempdir=$(mktemp -d)
+          cp ${target_dir}/${PROJECT_NAME} ${tempdir}
+          ( cd ${tempdir} && tar acf ${archive_path} ${PROJECT_NAME} )
+          rm -rf $tempdir
+          echo "archive_path=${archive_path}" >>$GITHUB_OUTPUT
+          echo "archive_sha256=$(sha256sum ${archive_path} | cut -d ' ' -f 1)" >>$GITHUB_OUTPUT
+
+      - name: Release
+        id: upload_asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.archive.outputs.archive_path }}
+          fail_on_unmatched_files: true
+          tag_name: v${{ needs.release.outputs.tag }}
+#          name: ${{ jobs.release.outputs.tag }}
+
+      - id: generate_unique_id
+        run: |
+          echo '${{ toJSON(matrix) }}' > ./matrix.txt
+          echo 'result=${{ hashFiles('./matrix.txt') }}' >>$GITHUB_OUTPUT
+      - id: generate_outputs
+        run: |
+          echo "${{ steps.archive.outputs.archive_sha256 }} ${{ fromJSON(steps.upload_asset.outputs.assets)[0].browser_download_url }}" >outputs.txt
+      - name: Upload outputs
+        uses: actions/upload-artifact@v2
+        with:
+          name: outputs-${{ steps.generate_unique_id.outputs.result }}
+          path: ${{ github.workspace }}/outputs.txt
+
+  taps:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          path: outputs
+      - run: |
+          ls outputs
+          cat outputs/*
