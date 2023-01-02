@@ -16,6 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - run: |
+        rustup set auto-self-update disable
+        rustup toolchain install stable --profile minimal
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
     - name: Build
       run: cargo build --verbose
     - name: Run tests
