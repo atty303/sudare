@@ -133,7 +133,7 @@ jobs:
           path: ${{ github.workspace }}/outputs.txt
 
   taps:
-    needs: build
+    needs: [release, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v3
@@ -141,10 +141,9 @@ jobs:
           path: outputs
       - id: payload
         run: |
-          echo -n "{" >payload.json
+          echo -n '{"version":"${{ needs.release.outputs.version }}","artifacts":{' >payload.json
           cat outputs/*/* |  sed -e 's/\([^ ]*\) \([^ ]*\) \(.*\)/"\1":{"sha256":"\2","url":"\3"}/' | tr '\n' ',' | sed 's/,$//' >>payload.json
-          echo -n "}" >>payload.json
-          cat payload.json
+          echo -n '}}' >>payload.json
           echo "payload_json=$(cat payload.json)" >>$GITHUB_OUTPUT
 
       - uses: peter-evans/repository-dispatch@v2
