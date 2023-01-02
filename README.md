@@ -42,11 +42,11 @@ sudare <procfile>
 
 ## Keymap
 
-| Key | Function               |
-| --- | ---------------------- |
-| ESC | Exit                   |
-| n   | Next process group     |
-| p   | Previous process group |
-| 0-9 | Select active process  |
-| j   | Scroll up              |
-| k   | Scroll down            |
+| Key     | Function               |
+| ------- | ---------------------- |
+| ESC     | Exit                   |
+| n, DOWN | Next process group     |
+| p, UP   | Previous process group |
+| 0-9     | Select active process  |
+| j       | Scroll up              |
+| k       | Scroll down            |
