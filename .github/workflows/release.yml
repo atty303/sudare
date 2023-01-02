@@ -119,13 +119,13 @@ jobs:
         with:
           files: ${{ steps.archive.outputs.archive_path }}
           fail_on_unmatched_files: true
-          tag_name: v${{ needs.release.outputs.tag }}
+          tag_name: ${{ needs.release.outputs.tag }}
 #          name: ${{ jobs.release.outputs.tag }}
 
       - id: generate_unique_id
         run: |
-          echo '${{ toJSON(matrix) }}' > ./matrix.txt
-          echo 'result=${{ hashFiles('./matrix.txt') }}' >>$GITHUB_OUTPUT
+          echo "${{ toJSON(matrix) }}" >.atrix.txt
+          echo "result=${{ hashFiles('matrix.txt') }}" >>$GITHUB_OUTPUT
       - id: generate_outputs
         run: |
           echo "${{ steps.archive.outputs.archive_sha256 }} ${{ fromJSON(steps.upload_asset.outputs.assets)[0].browser_download_url }}" >outputs.txt
@@ -143,5 +143,5 @@ jobs:
         with:
           path: outputs
       - run: |
-          ls outputs
-          cat outputs/*
+          ls outputs/*
+          cat outputs/*/*
