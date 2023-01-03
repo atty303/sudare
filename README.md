@@ -42,11 +42,20 @@ sudare <procfile>
 
 ## Keymap
 
-| Key     | Function               |
-| ------- | ---------------------- |
-| ESC     | Exit                   |
-| n, DOWN | Next process group     |
-| p, UP   | Previous process group |
-| 0-9     | Select active process  |
-| j       | Scroll up              |
-| k       | Scroll down            |
+| Key     | Function                       |
+| ------- | ------------------------------ |
+| ESC     | Exit                           |
+| n, DOWN | Next process group             |
+| p, UP   | Previous process group         |
+| 0-9     | Select active process in group |
+| j       | Scroll up                      |
+| k       | Scroll down                    |
+
+## Procfile extension
+
+You can group processes and activate one of them.
+
+```
+group-name[process-name-1]: echo foo
+gorup-name[process-name-2]: echo bar
+```
